@@ -3,10 +3,15 @@ import argparse
 import collections
 import datetime
 import itertools
+import io
 import os
 import re
 import subprocess
 import sys
+import codecs
+
+import imageio
+imageio.plugins.ffmpeg.download()
 
 from PIL import Image
 from PIL import ImageChops
@@ -14,6 +19,8 @@ from PIL import ImageStat
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import imagehash
 
+from google.cloud import vision
+from google.cloud.vision import types
 
 PRINT_REJECTED_MATCHES = True
 DATA_DIRPATH = os.path.join(
@@ -119,14 +126,16 @@ def histogram_diff(hist1, hist2):
     return sum(min(v1, v2) for v1, v2 in zip(hist1, hist2)) / sum(hist2)
 
 def format_timestamp(sec):
-    return '[{}]'.format(
-        datetime.timedelta(seconds=int(sec)),
-    )
+    hours, remainder = divmod(sec, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    return '{}h{}m{}s'.format(int(hours), int(minutes), int(seconds))
 
-def format_title(char_left_key, char_right_key):
+def format_title(char_left_key, char_right_key, player_left_name, player_right_name):
     char_name = lambda s: os.path.basename(s).split('-')[0]
-    return '{} vs {}'.format(
+    return '{} ({}) vs {} ({})'.format(
+        player_left_name,
         char_name(char_left_key),
+        player_right_name,
         char_name(char_right_key),
     )
 
@@ -199,7 +208,7 @@ if __name__ == '__main__':
     if not args.already_downloaded:
         remove_video_file(args.tmp_filepath)
         subprocess.check_call(
-            'youtube-dl --format worstvideo --no-continue --output "{}" "{}"'.format(
+            'youtube-dl --no-continue --output "{}" "{}"'.format(
                 args.tmp_filepath,
                 args.youtube_url,
             ),
@@ -220,6 +229,11 @@ if __name__ == '__main__':
             target_resolution=TARGET_RESOLUTION,
             resize_algorithm='fast_bilinear',
         )
+    high_res_clip = VideoFileClip(
+        args.tmp_filepath,
+        audio=False,
+        resize_algorithm='fast_bilinear',
+    )
 
 
     # Find match start timestamps
@@ -319,6 +333,39 @@ if __name__ == '__main__':
                     key=lambda kv: kv[1],
                 )[0]
 
+            # Figure out match players
+            ###############################################################
+            def determine_match_players(high_res_clip, sec, frame_path):
+                high_res_clip.to_ImageClip(sec).save_frame(frame_path)
+                with io.open(frame_path, 'rb') as image_file:
+                    content = image_file.read()
+
+                image = types.Image(content=content)
+                client = vision.ImageAnnotatorClient()
+                response = client.text_detection(image=image)
+                texts = response.text_annotations
+                player_one = []
+                player_two = []
+
+                for text in texts:
+                    vertices = text.bounding_poly.vertices
+                    is_below_upper_bound = (450 < vertices[0].y) and (450 < vertices[1].y)
+                    is_above_lower_bound = (vertices[2].y < 530) and (vertices[3].y < 530)
+                    if (is_below_upper_bound and is_above_lower_bound):
+                        is_player_one = (40 < vertices[0].x) and (vertices[1].x < 390)
+                        is_player_two = (800 < vertices[0].x) and (vertices[1].x < 1140)
+                        if is_player_one:
+                            player_one.append(text.description)
+                        elif is_player_two:
+                            player_two.append(text.description)
+
+                if (len(player_one) == 0):
+                    player_one = ['Unknown Player']
+                if (len(player_two) == 0):
+                    player_two = ['Unknown Player']
+
+                return [' '.join(player_one), ' '.join(player_two)]
+
             if vs_sec - early_vs_sec >= VS_INTERRUPTED_SECS_DIFF_THRESHOLD:
                 char_left_imgs = CHAR_LEFT_IMAGES
                 char_right_imgs = CHAR_RIGHT_IMAGES
@@ -353,6 +400,8 @@ if __name__ == '__main__':
             if is_above_char_threshold:
                 continue
 
+            frame_path = '{} {}.png'.format(format_timestamp(early_vs_sec), args.tmp_filepath)
+            char_keys.extend(determine_match_players(high_res_clip, sec, frame_path))
             sec_matches.append(early_vs_sec)
             title = format_title(*char_keys)
             match_titles.append(title)
@@ -370,7 +419,7 @@ if __name__ == '__main__':
     stripped_url = re.sub(r'&t=\d+', '', stripped_url)
     stripped_url = re.sub(r'#t=\d+', '', stripped_url)
 
-    with open(args.output_filepath, 'w') as f:
+    with codecs.open(args.output_filepath, 'w', 'utf-8') as f:
         f.write('<ol reversed>')
         for sec, title in zip(sec_matches[::-1], match_titles[::-1]):
             f.write(
