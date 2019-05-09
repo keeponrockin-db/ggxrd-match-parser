@@ -22,6 +22,3 @@ The source should be cross platform but has only been tested on linux and window
 # Notes
 * An ``ERROR: requested format not available`` message is typically caused by trying to download a live streaming video.
 * If parsed match timestamps appear incorrectly and consistently offset, this may be because the video is too recent. Youtube appears to continue processing videos after their initial upload, which can result in an erroneous partial video download. This can be an issue for up to ~48hrs for long videos (10hrs+), depends on the video length.
-
-# Further work
-* OCRing out the player names on the VS splash screen (need to download videos in higher quality format) would be nice. Some work has been done here in a [fork](https://github.com/keeponrockin-db/ggxrd-match-parser).
